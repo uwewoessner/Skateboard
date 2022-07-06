@@ -1,5 +1,6 @@
 
 #include <ArduinoOTA.h>
+#include <esp_task_wdt.h>
 #define DeviceName "Skateboard"
 
 #define ESP_ASYNC_WIFIMANAGER_VERSION_MIN_TARGET     "ESPAsync_WiFiManager v1.9.2"
@@ -95,8 +96,10 @@ FS *filesystem = &LITTLEFS;
 
 //debounceButton configButton(27);
 
+ulong lastWorkingTime = 0;
 
 
+void doSleep();
 #include <HX711.h>
 
 // HX711 circuit wiring
@@ -126,6 +129,7 @@ HX711 sensor[numSensors];
 
 void calcZeroOffset()
 {
+  lastWorkingTime=millis();
   Serial.println("Calibrating Zero");
   for (int i = 0; i < 10; i++)
   {
@@ -1061,6 +1065,7 @@ void setup()
       oldp = (int)per;
       toggleLED();
     }
+  esp_task_wdt_reset(); // reset the watchdog
     Serial.printf("Progress: %u%%\r", (unsigned int) per);
   });
   ArduinoOTA.onError([](ota_error_t error) {
@@ -1123,12 +1128,14 @@ void loop()
     Serial.printf("button Klicked\n");
     calcZeroOffset();
     sendDeviceInfo(WiFi.broadcastIP()); // re announce ourselves
+    lastWorkingTime=frameTime;
     mb.state = 1;
   }
   
     static int nblink=0;
   if(zeroButton.isPressed())
   { 
+    lastWorkingTime=frameTime;
     Serial.printf("button isPressed\n");
     mb.state = 2;
     if((frameTime-(pressedTime+(nblink*200))) >200)
@@ -1148,6 +1155,7 @@ void loop()
   }
   if(zeroButton.wasDoubleKlicked())
   {
+    lastWorkingTime=frameTime;
     Serial.printf("button Double Klicked\n");
     Serial.println(F("\nConfiguration portal requested."));
     startConfigAP();
@@ -1197,15 +1205,48 @@ void loop()
     toCOVER.write((const uint8_t *)&mb, sizeof(mb));
     toCOVER.endPacket();
     
+    lastWorkingTime=frameTime;
+    
   digitalWrite(LED_BUILTIN, LED_ON);
   }
-  else
+  else // we are not doing anything
   {
-    //toggleLED();
-    if(!zeroButton.isPressed())
+    static bool timeoutWarning = false;
+    if ((frameTime - lastWorkingTime) > 600000)
+    {
+      if (!timeoutWarning)
+      {
+        nblink = 0;
+        timeoutWarning = true;
+      }
+    }
+    else
+    {
+      timeoutWarning = false;
+    }
+    if ((frameTime - lastWorkingTime) > 610000)
+    {
+      doSleep();
+    }
+    if ((frameTime - (lastWorkingTime + (nblink * 200))) > 200)
+    {
+      nblink++;
+      toggleLED();
+    }
+    //
+    if(!zeroButton.isPressed()&&!timeoutWarning)
     digitalWrite(LED_BUILTIN, LED_OFF);
   }
 
   check_status();
   delay(100);
+}
+
+void doSleep()
+{
+   //Configure GPIO33 as ext0 wake up source for HIGH logic level
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)ZeroPin,0);
+
+  //Go to sleep now
+  esp_deep_sleep_start();
 }
